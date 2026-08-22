@@ -83,29 +83,6 @@ static void getUserName(char* out) {
     out[len] = '\0';
 }
 
-static void getFwInfo(char* ident, char* date) {
-    static union {
-        struct {
-            u8 _pad[8];
-            char id[4];
-            u8 _r0[12];
-            u8 bcdMin, bcdHour, bcdDay, bcdMonth, bcdYear;
-        } f;
-        u8 raw[32];
-    } hdr __attribute__((aligned(32)));
-
-    readFirmware(0x08, hdr.raw, sizeof(hdr.raw));
-
-    memcpy(ident, hdr.f.id, 4);
-    ident[4] = '\0';
-    for (int i = 0; i < 4; i++) {
-        if (ident[i] < 0x20 || ident[i] > 0x7E)
-            ident[i] = '?';
-    }
-
-    sprintf(date, "20%02X-%02X-%02X", hdr.f.bcdYear, hdr.f.bcdMonth, hdr.f.bcdDay);
-}
-
 static void getMacAddress(u8 out[6]) {
     static u8 mac[6] __attribute__((aligned(32)));
     readFirmware(0x36, mac, sizeof(mac));
@@ -438,13 +415,12 @@ static void onPmEvent(void* user, PmEvent event) {
 static PmEventCookie s_pmCookie;
 
 static void refreshInfo(bool* fatReady) {
-    char name[11], ident[5], date[12], slot1[32], storage[96], cfw[64];
+    char name[11], slot1[32], storage[96], cfw[64];
     u8 mac[6];
     int battPct;
     const char* battState;
 
     getUserName(name);
-    getFwInfo(ident, date);
     getMacAddress(mac);
     getSlot1(slot1);
     getStorage(storage, fatReady);
@@ -456,7 +432,6 @@ static void refreshInfo(bool* fatReady) {
     consoleClear();
     iprintf("\n\x1b[35mndsfetch\x1b[39m\n\n");
     iprintf("\x1b[36mConsole:\x1b[39m  %s\n", getConsoleName(hw));
-    iprintf("\x1b[36mFW Date:\x1b[39m  %s\n", date);
     iprintf("\x1b[36mUser:\x1b[39m     %s\n", name);
     iprintf("\x1b[36mCPU 1:\x1b[39m    ARM9 @ %u MHz\n", getCpuSpeedMHz());
     iprintf("\x1b[36mCPU 2:\x1b[39m    ARM7 @ 33 MHz\n");
