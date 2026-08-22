@@ -11,6 +11,11 @@ include $(DEVKITARM)/ds_rules
 NAME		:=	"ndsfetch"
 DESCRIPTION	:=	"Neofetch inspired system information display app with 3D gears for Nintendo DS."
 
+# ROM banner / meta info (overrides ds_rules defaults)
+GAME_TITLE	:=	ndsfetch
+GAME_SUBTITLE1	:=	Neofetch-like system info for Nintendo DS
+GAME_SUBTITLE2	:=	github.com/kotleni/ndsfetch
+
 #---------------------------------------------------------------------------------
 # TARGET is the name of the output
 # BUILD is the directory where object files & intermediate files will be placed

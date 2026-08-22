@@ -4,6 +4,8 @@
 #include <calico/nds/gbacart.h>
 #include <calico/nds/scfg.h>
 #include <calico/nds/env.h>
+#include <calico/nds/mm_env.h>
+#include <calico/nds/pm.h>
 #include <fat.h>
 #include <sys/statvfs.h>
 #include <sys/stat.h>
@@ -152,11 +154,15 @@ static void getBattery(int* percent, const char** state) {
 }
 
 static void getSlot1(char* out) {
+    static bool opened = false;
+
+    // On DSi, the slot is normally powered off when booting from SD. Power it
+    // back on (and wait for it to become ready) so we can talk to a cartridge.
     if (scfgIsPresent()) {
         unsigned mc = REG_SCFG_MC & SCFG_MC_POWER_MASK;
         if (mc == SCFG_MC_POWER_OFF || mc == SCFG_MC_POWER_OFF_REQ) {
             scfgSetMcPower(true);
-            for (int i = 0; i < 30; i++) {
+            for (int i = 0; i < 60; i++) {
                 swiWaitForVBlank();
                 if ((REG_SCFG_MC & SCFG_MC_POWER_MASK) == SCFG_MC_POWER_ON)
                     break;
@@ -164,36 +170,85 @@ static void getSlot1(char* out) {
         }
     }
 
-    sysSetCardOwner(true);
+    // Own the slot once (from the ARM9). This fails if the ARM7 owns the bus,
+    // e.g. a DLDI flashcard driver or nds-bootstrap.
+    if (!opened) {
+        if (!ntrcardOpen()) {
+            strcpy(out, "Flashcard");
+            return;
+        }
+        opened = true;
+    }
 
-    if (!ntrcardOpen()) {
-        strcpy(out, "Flashcard");
+    // DSi: card ejected?
+    if (scfgIsPresent() && (REG_SCFG_MC & SCFG_MC_IS_EJECTED)) {
+        ntrcardClearState();
+        strcpy(out, "Empty");
         return;
     }
 
-    NtrChipId id;
-    bool ok = false;
-    if (ntrcardGetMode() == NtrCardMode_Main || ntrcardStartup(-1))
-        ok = ntrcardGetChipId(&id);
-
-    if (ok && id.raw != 0xFFFFFFFF && id.raw != 0) {
-        u32 size = ntrcardCalcChipSize(id);
-        sprintf(out, "Game Card (%lu MB)", (unsigned long)(size >> 20));
-    } else {
-        strcpy(out, "Empty");
+    // (Re)initialize only when the card is actually uninitialized. Re-running
+    // the init sequence on an already-initialized card returns garbage on real
+    // hardware, so we must not do it on every refresh.
+    if (ntrcardGetMode() == NtrCardMode_None) {
+        if (!ntrcardStartup(-1)) {
+            ntrcardClearState();
+            strcpy(out, "Empty");
+            return;
+        }
     }
 
-    ntrcardClose();
+    NtrChipId id;
+    if (!ntrcardGetChipId(&id) || id.raw == 0 || id.raw == 0xFFFFFFFF) {
+        // Card changed or removed: force a re-init on the next refresh.
+        ntrcardClearState();
+        strcpy(out, "Empty");
+        return;
+    }
+
+    char title[13];
+    memset(title, 0, sizeof(title));
+    ntrcardRomRead(-1, 0, title, 12);
+
+    // Sanitize the 12-byte ASCII title.
+    for (int i = 0; i < 12; i++) {
+        char c = title[i];
+        title[i] = (c >= 0x20 && c < 0x7F) ? c : '?';
+    }
+    int tlen = 12;
+    while (tlen > 0 && title[tlen - 1] == ' ')
+        title[--tlen] = '\0';
+
+    u32 size = ntrcardCalcChipSize(id);
+    if (title[0] != '\0')
+        sprintf(out, "%s (%lu MB)", title, (unsigned long)(size >> 20));
+    else
+        sprintf(out, "Game Card (%lu MB)", (unsigned long)(size >> 20));
 }
 
-// TODO: Untested, dosent work with expantion cards on the melonDS.
 static const char* getSlot2(void) {
     if (!gbacartOpen())
         return "Empty";
 
-    bool present = *(vu16*)0x08000000 != *(vu16*)0x08020000;
+    vu16* rom = (vu16*)0x08000000;
+
+    // Open bus (no cartridge) mirrors the last fetched value, so two different
+    // addresses read back identical data. A real device returns distinct values.
+    bool present = rom[0] != rom[0x10000]; // 0x08000000 vs 0x08020000
+
+    const char* result = "Empty";
+    if (present) {
+        // Validate the GBA ROM header: the Nintendo logo checksum (0xCF56) sits
+        // at offset 0xA0. If it matches we have an actual game cartridge,
+        // otherwise it's a slot-2 accessory (expansion RAM, rumble, etc.).
+        if (rom[0xA0 / 2] == 0xCF56)
+            result = "Game Cartridge";
+        else
+            result = "Expansion";
+    }
+
     gbacartClose();
-    return present ? "Cartridge" : "Empty";
+    return result;
 }
 
 static void fmtSize(char* out, u64 bytes) {
@@ -320,45 +375,67 @@ static bool fsExists(const char* path) {
 }
 
 static void getCfw(char* out, bool fatReady, ConsoleType hw) {
-    static const struct { const char* root; } roots[] = {
-        { "sd:/" },
-        { "fat:/" },
-    };
-
-    bool twilight = false;
-    bool hiya = false;
-
-    if (fatReady && hw >= CONSOLE_DSI) {
-        for (unsigned i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
-            char path[64];
-            snprintf(path, sizeof(path), "%s_nds/TWiLightMenu", roots[i].root);
-            twilight = twilight || fsExists(path);
-            snprintf(path, sizeof(path), "%shiya.dsi", roots[i].root);
-            hiya = hiya || fsExists(path);
-        }
-    }
-
-    bool dldiActive = g_envExtraInfo->dldi_io_type != 0;
-    bool unlaunch = false;
-    if (hw >= CONSOLE_DSI && !scfgIsPresent() && !dldiActive)
-        unlaunch = true;
-
     out[0] = '\0';
-    if (unlaunch)
-        strcat(out, "Unlaunch");
-    if (twilight) {
-        if (out[0] != '\0')
-            strcat(out, ", ");
-        strcat(out, "TWiLight Menu++");
+
+    // CFW is DSi-only.
+    if (hw < CONSOLE_DSI)
+        return;
+
+    // hiyaCFW: ships as hiya.dsi on the SD root.
+    bool hiya = false;
+    if (fatReady) {
+        char path[64];
+        snprintf(path, sizeof(path), "sd:/hiya.dsi");
+        hiya = fsExists(path);
     }
-    if (hiya) {
-        if (out[0] != '\0')
-            strcat(out, ", ");
-        strcat(out, "hiyaCFW");
+
+    // Unlaunch / Relaunch unlock SCFG so homebrew gets full hardware access.
+    // This is detected via the SCFG backup (MM_ENV_TWL_SCFG_BACKUP) being
+    // non-zero; the stock launcher / flashcards leave it at zero ("locked").
+    bool scfgUnlocked = (*(const u32*)MM_ENV_TWL_SCFG_BACKUP) != 0;
+
+    // Relaunch is a drop-in Unlaunch clone and behaves identically at runtime,
+    // so we only try to tell it apart by its files on the SD card.
+    bool relaunch = false;
+    if (fatReady) {
+        char path[64];
+        snprintf(path, sizeof(path), "sd:/Relaunch.ini");
+        relaunch = fsExists(path);
+        snprintf(path, sizeof(path), "sd:/Relaunch.nds");
+        relaunch = relaunch || fsExists(path);
     }
-    if (out[0] == '\0')
-        strcpy(out, "None");
+
+    if (hiya)
+        strcpy(out, "hiyaCFW");
+    else if (scfgUnlocked)
+        strcpy(out, relaunch ? "Relaunch" : "Unlaunch");
+
+    // Leave empty when no CFW is detected; the field is then hidden.
 }
+
+static void init3D(void) {
+    powerOn(POWER_3D_CORE | POWER_MATRIX);
+    videoSetMode(MODE_0_3D);
+    lcdMainOnBottom();
+
+    glInit();
+    glClearColor(0, 0, 0, 31);
+    glClearPolyID(63);
+    glClearDepth(0x7FFF);
+    glViewport(0, 0, 255, 191);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(35, 256.0 / 192.0, 1.0, 40);
+}
+
+// The 3D engine state is lost across sleep; re-initialize it on wakeup.
+static void onPmEvent(void* user, PmEvent event) {
+    (void)user;
+    if (event == PmEvent_OnWakeup)
+        init3D();
+}
+
+static PmEventCookie s_pmCookie;
 
 static void refreshInfo(bool* fatReady) {
     char name[11], ident[5], date[12], slot1[32], storage[96], cfw[64];
@@ -377,27 +454,28 @@ static void refreshInfo(bool* fatReady) {
     getCfw(cfw, *fatReady, hw);
 
     consoleClear();
-    iprintf("\x1b[36mndsfetch\x1b[39m\n\n");
-    iprintf("\x1b[32mConsole:\x1b[39m  %s\n", getConsoleName(hw));
-    iprintf("\x1b[32mFW Date:\x1b[39m  %s\n", date);
-    iprintf("\x1b[32mUser:\x1b[39m     %s\n", name);
-    iprintf("\x1b[32mCPU 1:\x1b[39m    ARM9 @ %u MHz\n", getCpuSpeedMHz());
-    iprintf("\x1b[32mCPU 2:\x1b[39m    ARM7 @ 33 MHz\n");
-    iprintf("\x1b[32mMemory:\x1b[39m   %u MB RAM\n", getRamSizeMB());
-    iprintf("\x1b[32mDisplays:\x1b[39m 256x192 (x2)\n");
-    iprintf("\x1b[32mLang:\x1b[39m     %s\n", getLanguageName());
-    iprintf("\x1b[32mTheme:\x1b[39m    %s\n", getThemeName());
-    iprintf("\x1b[32mBattery:\x1b[39m  %d%% [%s]\n", battPct, battState);
-    iprintf("\x1b[32mSlot-1:\x1b[39m   %s\n", slot1);
+    iprintf("\n\x1b[35mndsfetch\x1b[39m\n\n");
+    iprintf("\x1b[36mConsole:\x1b[39m  %s\n", getConsoleName(hw));
+    iprintf("\x1b[36mFW Date:\x1b[39m  %s\n", date);
+    iprintf("\x1b[36mUser:\x1b[39m     %s\n", name);
+    iprintf("\x1b[36mCPU 1:\x1b[39m    ARM9 @ %u MHz\n", getCpuSpeedMHz());
+    iprintf("\x1b[36mCPU 2:\x1b[39m    ARM7 @ 33 MHz\n");
+    iprintf("\x1b[36mMemory:\x1b[39m   %u MB RAM\n", getRamSizeMB());
+    iprintf("\x1b[36mDisplays:\x1b[39m 256x192 (x2)\n");
+    iprintf("\x1b[36mLang:\x1b[39m     %s\n", getLanguageName());
+    iprintf("\x1b[36mTheme:\x1b[39m    %s\n", getThemeName());
+    iprintf("\x1b[36mBattery:\x1b[39m  %d%% [%s]\n", battPct, battState);
+    iprintf("\x1b[36mSlot-1:\x1b[39m   %s\n", slot1);
     unsigned char hasSlot2 = hw == CONSOLE_DS ||
             hw == CONSOLE_DS_LITE ||
             hw == CONSOLE_IQUE_DS ||
             hw == CONSOLE_IQUE_DS_LITE;
     if (hasSlot2)
-        iprintf("\x1b[32mSlot-2:\x1b[39m   %s\n", getSlot2());
-    iprintf("\x1b[32mStorage:\x1b[39m  %s\n", storage);
-    iprintf("\x1b[32mCFW:\x1b[39m      %s\n", cfw);
-    // iprintf("\x1b[32mMAC:\x1b[39m      %02X:%02X:%02X:%02X:%02X:%02X\n",
+        iprintf("\x1b[36mSlot-2:\x1b[39m   %s\n", getSlot2());
+    iprintf("\x1b[36mStorage:\x1b[39m  %s\n", storage);
+    if (cfw[0] != '\0')
+        iprintf("\x1b[36mCFW:\x1b[39m      %s\n", cfw);
+    // iprintf("MAC:      %02X:%02X:%02X:%02X:%02X:%02X\n",
     //    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
@@ -415,36 +493,30 @@ int main(void) {
         true
     );
 
-    powerOn(POWER_3D_CORE | POWER_MATRIX);
-    videoSetMode(MODE_0_3D);
-    lcdMainOnBottom();
+    // Recolor the title. The console's magenta slot (escape 35) is palette
+    // entry 95 on the sub-engine; repaint it to a soft pink.
+    BG_PALETTE_SUB[95] = RGB15(31, 12, 24);
 
-    glInit();
-    glClearColor(0, 0, 0, 31);
-    glClearPolyID(63);
-    glClearDepth(0x7FFF);
-    glViewport(0, 0, 255, 191);
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    gluPerspective(35, 256.0 / 192.0, 1.0, 40);
+    init3D();
+    pmAddEventHandler(&s_pmCookie, onPmEvent, NULL);
 
     bool fatReady = false;
     refreshInfo(&fatReady);
 
     int n1 = genGear(gearQ1, 0.35f, 1.0f, 0.5f, 10, 0.25f);
-    int n2 = genGear(gearQ2, 0.5f, 1.6f, 0.5f, 16, 0.25f);
+    int n2 = genGear(gearQ2, 0.5f, 1.45f, 0.5f, 16, 0.25f);
 
     const int tiltX = degreesToAngle(24);
     const int tiltY = degreesToAngle(24);
     int ang1 = 0;
     int frames = 0;
 
-    while (1) {
+    while (pmMainLoop()) {
         swiWaitForVBlank();
         scanKeys();
 
-        if ((keysDown() & KEY_SELECT) || pmShouldReset())
-            break;
+        if (keysDown() & KEY_SELECT)
+            pmPrepareToReset();
 
         if (keysDown() & KEY_TOUCH)
             lcdSwap();
@@ -462,18 +534,21 @@ int main(void) {
         glRotatef32i(tiltX, floattof32(1), 0, 0);
         glRotatef32i(tiltY, 0, floattof32(1), 0);
 
+        // Clear the 3D color/depth buffers each frame (libnds here lacks glClear).
+        GFX_CLEAR_COLOR = RGB15(0, 0, 0) | (31 << 16) | (1 << 15);
+        GFX_CLEAR_DEPTH = 0x7FFF | (1 << 15);
         glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE);
 
         glPushMatrix();
-        glTranslatef32(floattof32(-1.24f), 0, floattof32(0.005f));
+        glTranslatef32(floattof32(-1.2f), 0, floattof32(0.005f));
         glRotatef32i(ang1, 0, 0, floattof32(1));
-        drawGear(gearQ1, n1, 255, 64, 64);
+        drawGear(gearQ1, n1, 255, 160, 200);
         glPopMatrix(1);
 
         glPushMatrix();
-        glTranslatef32(floattof32(1.24f), 0, floattof32(-0.005f));
+        glTranslatef32(floattof32(1.2f), 0, floattof32(-0.005f));
         glRotatef32i((-ang1 * 10 / 16 + 1536) & (DEGREES_IN_CIRCLE - 1), 0, 0, floattof32(1));
-        drawGear(gearQ2, n2, 64, 128, 255);
+        drawGear(gearQ2, n2, 150, 215, 255);
         glPopMatrix(1);
 
         glFlush(GL_WBUFFERING);
