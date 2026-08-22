@@ -430,7 +430,7 @@ static void refreshInfo(bool* fatReady) {
     getCfw(cfw, *fatReady, hw);
 
     consoleClear();
-    iprintf("\n\x1b[35mndsfetch\x1b[39m\n\n");
+    iprintf("\x1b[35mndsfetch\x1b[39m\n\n");
     iprintf("\x1b[36mConsole:\x1b[39m  %s\n", getConsoleName(hw));
     iprintf("\x1b[36mUser:\x1b[39m     %s\n", name);
     iprintf("\x1b[36mCPU 1:\x1b[39m    ARM9 @ %u MHz\n", getCpuSpeedMHz());
@@ -490,7 +490,7 @@ int main(void) {
         swiWaitForVBlank();
         scanKeys();
 
-        if (keysDown() & KEY_SELECT)
+        if (keysDown() & KEY_START)
             pmPrepareToReset();
 
         if (keysDown() & KEY_TOUCH)
