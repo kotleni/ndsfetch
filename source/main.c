@@ -127,6 +127,37 @@ static const char* getThemeName(void) {
     return themes[PersonalData->theme & 15];
 }
 
+static const char* getBiosStatus(void) {
+    static char buf[32];
+    u16 crc = g_envFwBootInfo->bios7_crc16;
+    sprintf(buf, "%04X", crc);
+    return buf;
+}
+
+static const char* getRegionName(void) {
+    if (!scfgIsPresent())
+        return "N/A";
+    static const char* regions[] = {"JPN", "USA", "EUR", "AUS", "CHN", "KOR"};
+    unsigned r = g_envTwlSecureInfo->region;
+    return (r < 6) ? regions[r] : "Unknown";
+}
+
+static const char* getSerial(void) {
+    if (!scfgIsPresent())
+        return "N/A";
+    return g_envTwlSecureInfo->serial;
+}
+
+static const char* getWifiModule(void) {
+    return scfgIsPresent() ? "Atheros" : "Mitsumi";
+}
+
+static const char* getBootSource(void) {
+    static const char* names[] = {"Unknown", "Card", "Wireless", "SD/NAND", "RAM"};
+    unsigned src = g_envBootParam->boot_src;
+    return (src < 5) ? names[src] : "Unknown";
+}
+
 static void getBattery(int* percent, const char** state) {
     unsigned st = pmGetBatteryState();
     *percent = PM_BATT_LEVEL(st) * 100 / 15;
@@ -440,6 +471,11 @@ static void refreshInfo(bool isExtendedMode, bool* fatReady) {
     iprintf("\x1b[36mCPU 2:\x1b[39m    ARM7 @ 33 MHz\n");
     iprintf("\x1b[36mMemory:\x1b[39m   %u MB RAM\n", getRamSizeMB());
     iprintf("\x1b[36mDisplays:\x1b[39m 256x192 (x2)\n");
+    iprintf("\x1b[36mWiFi:\x1b[39m    %s\n", getWifiModule());
+    if (hw >= CONSOLE_DSI) {
+        iprintf("\x1b[36mRegion:\x1b[39m  %s\n", getRegionName());
+        iprintf("\x1b[36mSerial:\x1b[39m  %s\n", getSerial());
+    }
     iprintf("\x1b[36mLang:\x1b[39m     %s\n", getLanguageName());
     iprintf("\x1b[36mTheme:\x1b[39m    %s\n", getThemeName());
     iprintf("\x1b[36mBattery:\x1b[39m  %d%% [%s]\n", battPct, battState);
@@ -454,9 +490,12 @@ static void refreshInfo(bool isExtendedMode, bool* fatReady) {
     if (cfw[0] != '\0')
         iprintf("\x1b[36mCFW:\x1b[39m      %s\n", cfw);
     
-    if (isExtendedMode)
+    if (isExtendedMode) {
+        iprintf("\x1b[36mBIOS:\x1b[39m    %s\n", getBiosStatus());
+        iprintf("\x1b[36mBoot:\x1b[39m    %s\n", getBootSource());
         iprintf("\x1b[36mMAC:\x1b[39m      %02X:%02X:%02X:%02X:%02X:%02X\n",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
 }
 
 int main(void) {
