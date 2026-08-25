@@ -100,8 +100,11 @@ static unsigned getRamSizeMB(void) {
         return 4;
 
     switch (REG_SCFG_EXT & SCFG_EXT_RAM_MASK) {
-        case SCFG_EXT_RAM_16MB: return 16;
-        case SCFG_EXT_RAM_32MB: return 32;
+        // DSi reports that it's have 32MB,
+        // so we will just assume that user
+        // with dev-kit will never run this app.
+        case SCFG_EXT_RAM_16MB:
+        case SCFG_EXT_RAM_32MB: return 16;
         default:                return 4;
     }
 }
