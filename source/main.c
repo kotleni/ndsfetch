@@ -417,7 +417,7 @@ static void onPmEvent(void* user, PmEvent event) {
 
 static PmEventCookie s_pmCookie;
 
-static void refreshInfo(bool* fatReady) {
+static void refreshInfo(bool isExtendedMode, bool* fatReady) {
     char name[11], slot1[32], storage[96], cfw[64];
     u8 mac[6];
     int battPct;
@@ -453,8 +453,10 @@ static void refreshInfo(bool* fatReady) {
     iprintf("\x1b[36mStorage:\x1b[39m  %s\n", storage);
     if (cfw[0] != '\0')
         iprintf("\x1b[36mCFW:\x1b[39m      %s\n", cfw);
-    // iprintf("MAC:      %02X:%02X:%02X:%02X:%02X:%02X\n",
-    //    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    
+    if (isExtendedMode)
+        iprintf("\x1b[36mMAC:\x1b[39m      %02X:%02X:%02X:%02X:%02X:%02X\n",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
 int main(void) {
@@ -478,8 +480,9 @@ int main(void) {
     init3D();
     pmAddEventHandler(&s_pmCookie, onPmEvent, NULL);
 
+    bool isExtendedMode = false;
     bool fatReady = false;
-    refreshInfo(&fatReady);
+    refreshInfo(isExtendedMode, &fatReady);
 
     int n1 = genGear(gearQ1, 0.35f, 1.0f, 0.5f, 10, 0.25f);
     int n2 = genGear(gearQ2, 0.5f, 1.45f, 0.5f, 16, 0.25f);
@@ -496,12 +499,15 @@ int main(void) {
         if (keysDown() & KEY_START)
             pmPrepareToReset();
 
+        if (keysDown() & KEY_SELECT)
+            isExtendedMode = !isExtendedMode;
+
         if (keysDown() & KEY_TOUCH)
             lcdSwap();
 
-        if (++frames >= REFRESH_FRAMES) {
+        if (++frames >= REFRESH_FRAMES || keysDown()) {
             frames = 0;
-            refreshInfo(&fatReady);
+            refreshInfo(isExtendedMode, &fatReady);
         }
 
         ang1 = (ang1 + 64) & (DEGREES_IN_CIRCLE - 1);
